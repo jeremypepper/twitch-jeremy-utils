@@ -16,7 +16,6 @@ if (!clientSecret) {
   console.error("need to set the twitch secret env var TWITCH_SECRET")
   process.exit(1);
 }
-const xanagearId = 49179443;
 
 const retryOperation = retry.operation({
   retries: 3,
@@ -37,10 +36,26 @@ async function getToken() {
       })
 }
 
-async function getSomething(token, clipOptions) {
+async function getUserId(token, name) {
+  const url = `https://api.twitch.tv/helix/search/channels?first=1&query=` + encodeURIComponent(name);
+  console.log("fetching", url)
+  return await axios.get(url, {
+    headers: {
+      'client-id': clientId,
+      Authorization: `Bearer ${token}`
+    }
+  }).then(response => {
+    return response.data.data[0].id
+  }).catch(e=> {
+    console.error("could not fetch id", e);
+    process.exit(1);
+  })
+}
+
+async function getClips(token, clipOptions, userId) {
   const after = clipOptions.nHoursAgoStart.toISO()
   const before = clipOptions.nHoursAgoEnd.toISO();
-  const url = `https://api.twitch.tv/helix/clips?broadcaster_id=${xanagearId}&started_at=${after}&ended_at=${before}&first=${clipOptions.clipsToFetch}`;
+  const url = `https://api.twitch.tv/helix/clips?broadcaster_id=${userId}&started_at=${after}&ended_at=${before}&first=${clipOptions.clipsToFetch}`;
   console.log("fetching", url)
   return await axios.get(url, {
     headers: {
@@ -125,22 +140,30 @@ function sleep(ms) {
 
 function parseArgs() {
   const parsedArgs = require('yargs/yargs')(process.argv.slice(2))
-      .option('s', {
-        alias: 'Start Hours Ago',
-        default: 6,
-        type: 'number',
-      })
-      .option('e', {
-        alias: 'End Hours Ago',
-        default: 0,
-        type: 'number',
-      })
-      .option('n', {
-        alias: 'Number of clips to fetch',
-        default: 10,
-        type: 'number',
-      })
-      .argv
+      .command('$0 channelName','download clips from a channel and merge into a highlight video',
+        yargs => {
+          yargs
+          .option('s', {
+            describe: 'Start Hours Ago',
+            default: 6,
+            type: 'number',
+          })
+          .option('e', {
+            describe: 'End Hours Ago',
+            default: 0,
+            type: 'number',
+          })
+          .option('n', {
+            describe: 'Number of clips to fetch',
+            default: 10,
+            type: 'number',
+          })
+          .positional('channelName', {
+            describe: 'Name of the channel to fetch',
+            type: 'string',
+          })
+        }
+      ).argv;
   const nHoursAgoStart = now.plus({hours: -parsedArgs.s})
   const dir = `downloads/${nHoursAgoStart.toISODate()}`;
   const clipOptions = {
@@ -150,6 +173,7 @@ function parseArgs() {
     dir,
     playlistFile: `${dir}/playlist.m3u`,
     highlightsPath: `${dir}/_highlights.mp4`,
+    name: parsedArgs.channelName,
   }
   return clipOptions;
 }
@@ -159,7 +183,8 @@ async function go() {
 
   await mkdirp(clipOptions.dir)
   const token = await getToken()
-  const clipUrls = await getSomething(token, clipOptions)
+  const userId = await getUserId(token, clipOptions.name)
+  const clipUrls = await getClips(token, clipOptions, userId)
   await downloadClips(clipUrls, clipOptions);
   await merge(clipUrls.length, clipOptions)
   console.log("Reencode complete.")
