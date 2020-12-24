@@ -64,32 +64,39 @@ async function getClips(token, clipOptions, userId) {
     }
   }).then(response => {
     console.log("got clips from twitch")
-    console.log(_.map(response.data.data, clip => clip.title))
-    return _.map(response.data.data, clip => {
-      return clip.url
-    })
+    console.log(_.map(response.data.data, clip => clip.title + " " + clip.url))
+    return response.data.data;
   })
 }
 
-async function downloadClips(clipUrls, clipOptions) {
+async function downloadClips(clipsData, clipOptions) {
   const playlistLines = ["#EXTM3U"];
-  for (let i = 0; i < clipUrls.length; i++) {
-    const clipUrl = clipUrls[i];
-    const url = 'https://clipr.xyz/api/grabclip'
+  const clipPaths = [];
+  for (let i = 0; i < clipsData.length; i++) {
+    const clipData = clipsData[i];
+    const clipUrl = clipData.url;
+    const url = 'https://clipr.xyz/api/grabclip';
+    const clipName = _.truncate(
+        clipData.title.replace(/\W+/g, "-"),
+        {length: 50, omission: ""})
+        + "_" + clipData["video_id"];
     const downloadUrl = await axios.post(url, {
       clip_url: clipUrl
     }).then(response=> {
       return 'https:' + response.data["download_url"];
-    })
+    });
     retryOperation.attempt(async (currentAttempt) =>{
       console.log("downloading", downloadUrl, "attempt", currentAttempt)
       try {
         await axios.get(downloadUrl, {
           responseType: 'stream'
         }).then(response => {
-          response.data.pipe(fs.createWriteStream(`${clipOptions.dir}/${i}.mp4`))
-          playlistLines.push(`#EXTINF:5,${i}.mp4`)
-          playlistLines.push(`${i}.mp4`);
+          const clipPath = `${clipOptions.dir}/${clipName}.mp4`;
+          response.data.pipe(fs.createWriteStream(clipPath))
+          playlistLines.push(`#EXTINF:5,${clipName}.mp4`)
+          playlistLines.push(`${clipName}.mp4`);
+          clipPaths.push(clipPath);
+          console.log("file downloaded to", clipPath)
         })
       } catch (e) {
         console.warn(e);
@@ -101,25 +108,28 @@ async function downloadClips(clipUrls, clipOptions) {
   await sleep(2500)
   fs.writeFileSync(clipOptions.playlistFile, playlistLines.join("\n"))
   console.log("wrote playlist to", clipOptions.playlistFile)
+  return clipPaths;
 }
 
-async function merge(fileCount, clipOptions) {
+async function merge(clipPaths, clipOptions) {
   console.log("merging with ffmpeg")
   const inputs = [];
   const filterComplex = [];
-  for (let i = 0; i < fileCount; i++) {
-    inputs.push(`-i ${clipOptions.dir}/${i}.mp4`)
+  for (let i = 0; i < clipPaths.length; i++) {
+    inputs.push(`-i ${clipPaths[i]}`)
     filterComplex.push(`[${i}:v] [${i}:a]`)
   }
 
   const inputArgs = inputs.join(" ");
   const filterComplexArgs = filterComplex.join(" ")
-  const cmdArgs = [...inputArgs.split(" "), "-filter_complex",
-  `${filterComplexArgs}\n concat=n=${fileCount}:v=1:a=1 [v] [a]`,
-    '-map', '[v]',
-    '-map', '[a]',
-    '-y',
-    `${clipOptions.highlightsPath}`
+  const cmdArgs = [
+      ...inputArgs.split(" "),
+      "-filter_complex",
+      `${filterComplexArgs}\n concat=n=${clipPaths.length}:v=1:a=1 [v] [a]`,
+        '-map', '[v]',
+        '-map', '[a]',
+        '-y',
+        `${clipOptions.highlightsPath}`
   ]
   console.log("calling ffmpeg", cmdArgs)
 
@@ -172,7 +182,7 @@ function parseArgs() {
     clipsToFetch: parsedArgs.n,
     dir,
     playlistFile: `${dir}/playlist.m3u`,
-    highlightsPath: `${dir}/_highlights.mp4`,
+    highlightsPath: `${dir}/_highlights_${now.valueOf()}.mp4`,
     name: parsedArgs.channelName,
   }
   return clipOptions;
@@ -184,9 +194,9 @@ async function go() {
   await mkdirp(clipOptions.dir)
   const token = await getToken()
   const userId = await getUserId(token, clipOptions.name)
-  const clipUrls = await getClips(token, clipOptions, userId)
-  await downloadClips(clipUrls, clipOptions);
-  await merge(clipUrls.length, clipOptions)
+  const clipsData = await getClips(token, clipOptions, userId)
+  const clipPaths = await downloadClips(clipsData, clipOptions);
+  await merge(clipPaths, clipOptions)
   console.log("Reencode complete.")
   console.log(clipOptions.highlightsPath)
   console.log("Download clips playlist")
